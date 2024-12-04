@@ -5,6 +5,8 @@ from torch import nn
 from models.vit import VisionTransformer
 from models.xbert import BertConfig, BertForMaskedLM
 from models.cross_transformer import CrossTransformer
+from models.vmamba import vmamba_small_s2l15
+import einops
 
 class ALBEF(nn.Module):
     def __init__(self,
@@ -17,18 +19,20 @@ class ALBEF(nn.Module):
         self.tokenizer = tokenizer
         embed_dim = config['embed_dim']
         vision_width = config['vision_width']
-        self.visual_encoder = VisionTransformer(
-            img_size=config['image_res'], patch_size=16, embed_dim=768, depth=12, num_heads=12,
-            mlp_ratio=4, qkv_bias=True, norm_layer=partial(nn.LayerNorm, eps=1e-6), )
+        # self.visual_encoder = VisionTransformer(
+        #     img_size=config['image_res'], patch_size=16, embed_dim=768, depth=12, num_heads=12,
+        #     mlp_ratio=4, qkv_bias=True, norm_layer=partial(nn.LayerNorm, eps=1e-6), )        
+        self.visual_encoder = vmamba_small_s2l15(channel_first=True)
+        
         bert_config = BertConfig.from_json_file(config['bert_config'])
 
-        self.visual_decoder = CrossTransformer(768, 8, 96, 
-                                depth = 4, context_dim=768)
-        self.decoder_pred = nn.Linear(768, 16**2 * 3, bias=True) # decoder to patch
-        scale = 768 ** -0.5 # 1/sqrt(768)
-        self.visual_decoder_pos_embed = nn.Parameter(scale * torch.randn(577, 768))
+        # self.visual_decoder = CrossTransformer(768, 8, 96, 
+        #                         depth = 4, context_dim=768)
+        # self.decoder_pred = nn.Linear(768, 16**2 * 3, bias=True) # decoder to patch
+        # scale = 768 ** -0.5 # 1/sqrt(768)
+        # self.visual_decoder_pos_embed = nn.Parameter(scale * torch.randn(577, 768))
         
-        self.mask_token = nn.Parameter(torch.randn(1, 1, 768))
+        # self.mask_token = nn.Parameter(torch.randn(1, 1, 768))
         
         self.text_encoder = BertForMaskedLM.from_pretrained(text_encoder, config=bert_config)
         self.text_width = self.text_encoder.config.hidden_size
@@ -44,9 +48,10 @@ class ALBEF(nn.Module):
         self.prd_head = nn.Linear(self.text_width, 2)
         self.mrtd_head = nn.Linear(self.text_width, 2)
         # create momentum models
-        self.visual_encoder_m = VisionTransformer(
-            img_size=config['image_res'], patch_size=16, embed_dim=768, depth=12, num_heads=12,
-            mlp_ratio=4, qkv_bias=True, norm_layer=partial(nn.LayerNorm, eps=1e-6), )
+        # self.visual_encoder_m = VisionTransformer(
+        #     img_size=config['image_res'], patch_size=16, embed_dim=768, depth=12, num_heads=12,
+        #     mlp_ratio=4, qkv_bias=True, norm_layer=partial(nn.LayerNorm, eps=1e-6), )        
+        self.visual_encoder_m = vmamba_small_s2l15(channel_first=True)
         self.vision_proj_m = nn.Linear(vision_width, embed_dim)
         self.text_encoder_m = BertForMaskedLM.from_pretrained(text_encoder, config=bert_config)
         self.text_proj_m = nn.Linear(self.text_width, embed_dim)
@@ -70,9 +75,12 @@ class ALBEF(nn.Module):
     def forward(self, image1, image2, text1, text2, alpha, idx, replace):
         # extract image features
         image_embeds = self.visual_encoder(image1)
-        N, L, D = image_embeds.size()
+        B,C,H,W = image_embeds.size()
+        image_embeds = einops.rearrange(image_embeds, 'B C H W -> B (H W) C')
+        #N, L, D = image_embeds.size()
         image_atts = torch.ones(image_embeds.size()[:-1], dtype=torch.long).to(image1.device)
-        image_feat = F.normalize(self.vision_proj(image_embeds[:, 0, :]), dim=-1)
+        #image_feat = F.normalize(self.vision_proj(image_embeds[:, 0, :]), dim=-1)
+        image_feat = F.normalize(self.vision_proj(image_embeds.mean(dim = 1)), dim=-1)
 
         # extract text features
         text_output = self.text_encoder.bert(text2.input_ids, attention_mask=text2.attention_mask,
@@ -89,7 +97,9 @@ class ALBEF(nn.Module):
         with torch.no_grad():
             self._momentum_update()
             image_embeds_m = self.visual_encoder_m(image2)
-            image_feat_m = F.normalize(self.vision_proj_m(image_embeds_m[:, 0, :]), dim=-1)
+            image_embeds_m = einops.rearrange(image_embeds_m, 'B C H W -> B (H W) C')
+            #image_feat_m = F.normalize(self.vision_proj_m(image_embeds_m[:, 0, :]), dim=-1)
+            image_feat_m = F.normalize(self.vision_proj_m(image_embeds.mean(dim = 1)), dim=-1)
             image_feat_all = torch.cat([image_feat_m.t(), self.image_queue.clone().detach()], dim=1)
 
             text_output_m = self.text_encoder_m.bert(text2.input_ids, attention_mask=text2.attention_mask,
@@ -266,23 +276,23 @@ class ALBEF(nn.Module):
         mrtd_output = self.mrtd_head(output_mrtd.last_hidden_state.view(-1, self.text_width))
         loss_mrtd = F.cross_entropy(mrtd_output, mrtd_labels.view(-1))
 
-        # mae loss
-        x, mask, ids_restore = self.visual_encoder(image1, mask_ratio=self.mask_ratio)
+        # # mae loss
+        # x, mask, ids_restore = self.visual_encoder(image1, mask_ratio=self.mask_ratio)
 
-        mask_tokens = self.mask_token.repeat(x.shape[0], ids_restore.shape[1] + 1 - x.shape[1], 1)
-        x_ = torch.cat([x[:, 1:, :], mask_tokens], dim=1)  # no cls token
-        x_ = torch.gather(x_, dim=1, index=ids_restore.unsqueeze(-1).repeat(1, 1, x.shape[2]))  # unshuffle
-        x = torch.cat([x[:, :1, :], x_], dim=1)  # append cls token
-        x = x + self.visual_decoder_pos_embed[:x.size(1)]
+        # mask_tokens = self.mask_token.repeat(x.shape[0], ids_restore.shape[1] + 1 - x.shape[1], 1)
+        # x_ = torch.cat([x[:, 1:, :], mask_tokens], dim=1)  # no cls token
+        # x_ = torch.gather(x_, dim=1, index=ids_restore.unsqueeze(-1).repeat(1, 1, x.shape[2]))  # unshuffle
+        # x = torch.cat([x[:, :1, :], x_], dim=1)  # append cls token
+        # x = x + self.visual_decoder_pos_embed[:x.size(1)]
 
-        x = self.visual_decoder(x, text_output.last_hidden_state)
-        x = self.decoder_pred(x)
+        # x = self.visual_decoder(x, text_output.last_hidden_state)
+        # x = self.decoder_pred(x)
 
-        x = x[:,1:,:]
+        # x = x[:,1:,:]
 
-        loss_mae = self.forward_loss(image1, x, mask)
+        # loss_mae = self.forward_loss(image1, x, mask)
 
-        return loss_cl, loss_pitm, loss_mlm, loss_prd, loss_mrtd, loss_mae, loss_attribute
+        return loss_cl, loss_pitm, loss_mlm, loss_prd, loss_mrtd, loss_attribute
     
     def patchify(self, imgs):
         """

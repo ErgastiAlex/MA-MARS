@@ -35,7 +35,7 @@ def train(model, data_loader, optimizer, tokenizer, epoch, warmup_steps, device,
     metric_logger.add_meter('loss_mlm', utils.SmoothedValue(window_size=1, fmt='{value:.4f}'))
     metric_logger.add_meter('loss_prd', utils.SmoothedValue(window_size=1, fmt='{value:.4f}'))
     metric_logger.add_meter('loss_mrtd', utils.SmoothedValue(window_size=1, fmt='{value:.4f}'))
-    metric_logger.add_meter('loss_mae', utils.SmoothedValue(window_size=1, fmt='{value:.4f}'))
+    #metric_logger.add_meter('loss_mae', utils.SmoothedValue(window_size=1, fmt='{value:.4f}'))
     metric_logger.add_meter('loss_attribute', utils.SmoothedValue(window_size=1, fmt='{value:.4f}'))
     header = 'Train Epoch: [{}]'.format(epoch)
     print_freq = 50
@@ -64,10 +64,10 @@ def train(model, data_loader, optimizer, tokenizer, epoch, warmup_steps, device,
             alpha = config['alpha']
         else:
             alpha = config['alpha'] * min(1.0, i / len(data_loader))
-        loss_cl, loss_pitm, loss_mlm, loss_prd, loss_mrtd, loss_mae, loss_attribute = model(image1, image2, text_input1, text_input2,
+        loss_cl, loss_pitm, loss_mlm, loss_prd, loss_mrtd, loss_attribute = model(image1, image2, text_input1, text_input2,
                                                                   alpha=alpha, idx=idx, replace=replace)
         loss = 0.
-        for j, los in enumerate((loss_cl, loss_pitm, loss_mlm, loss_prd, loss_mrtd, loss_mae, loss_attribute)):
+        for j, los in enumerate((loss_cl, loss_pitm, loss_mlm, loss_prd, loss_mrtd, loss_attribute)):
             loss += config['weights'][j] * los
         optimizer.zero_grad()
         loss.backward()
@@ -77,7 +77,7 @@ def train(model, data_loader, optimizer, tokenizer, epoch, warmup_steps, device,
         metric_logger.update(loss_mlm=loss_mlm.item())
         metric_logger.update(loss_prd=loss_prd.item())
         metric_logger.update(loss_mrtd=loss_mrtd.item())
-        metric_logger.update(loss_mae=loss_mae.item())
+        #metric_logger.update(loss_mae=loss_mae.item())
         metric_logger.update(loss_attribute=loss_attribute.item())
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
         if epoch == 0 and i % step_size == 0 and i <= warmup_iterations:
@@ -279,7 +279,7 @@ def main(args, config):
     train_loader, val_loader, test_loader = create_loader([train_dataset, val_dataset, test_dataset], samplers,
                                                           batch_size=[config['batch_size_train']] + [
                                                               config['batch_size_test']] * 2,
-                                                          num_workers=[4, 4, 4],
+                                                          num_workers=[16, 16, 16],
                                                           is_trains=[True, False, False],
                                                           collate_fns=[None, None, None])
     print(args.text_encoder)
@@ -312,16 +312,19 @@ def main(args, config):
             start_epoch = checkpoint['epoch'] + 1
             best = checkpoint['best']
             best_epoch = checkpoint['best_epoch']
-        else:
-            # reshape positional embedding to accomodate for image resolution change
-            pos_embed_reshaped = interpolate_pos_embed(state_dict['visual_encoder.pos_embed'], model.visual_encoder)
-            state_dict['visual_encoder.pos_embed'] = pos_embed_reshaped
-            m_pos_embed_reshaped = interpolate_pos_embed(state_dict['visual_encoder_m.pos_embed'],
-                                                         model.visual_encoder_m)
-            state_dict['visual_encoder_m.pos_embed'] = m_pos_embed_reshaped
-        msg = model.load_state_dict(state_dict, strict=False)
+        # else:
+        #     # reshape positional embedding to accomodate for image resolution change
+        #     pos_embed_reshaped = interpolate_pos_embed(state_dict['visual_encoder.pos_embed'], model.visual_encoder)
+        #     state_dict['visual_encoder.pos_embed'] = pos_embed_reshaped
+        #     m_pos_embed_reshaped = interpolate_pos_embed(state_dict['visual_encoder_m.pos_embed'],
+        #                                                  model.visual_encoder_m)
+        #     state_dict['visual_encoder_m.pos_embed'] = m_pos_embed_reshaped
+        #msg = model.load_state_dict(state_dict, strict=False)
         print('load checkpoint from %s' % args.checkpoint)
-        print(msg)
+        #print(msg)
+        
+        model.visual_encoder.load_state_dict(torch.load('checkpoints/vssm_small_0229_ckpt_epoch_222.pth')['model'])
+        model.visual_encoder_m.load_state_dict(torch.load('checkpoints/vssm_small_0229_ckpt_epoch_222.pth')['model'])
 
     model_without_ddp = model
     if args.distributed:

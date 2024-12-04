@@ -17,12 +17,12 @@ schedular: {cooldown_epochs: 0, decay_rate: 1, epochs: 30, lr: 1e-05, min_lr: 1e
   sched: cosine, warmup_epochs: 1, warmup_lr: 1e-05}
 temp: 0.07
 
-test_file: ./datasets/CUHK-PEDES/processed_data/test.json
-test_image_root: ./datasets/CUHK-PEDES/imgs
-train_file: [./datasets/CUHK-PEDES/processed_data/train.json]
-train_image_root: ./datasets/CUHK-PEDES/imgs
-val_file: ./datasets/CUHK-PEDES/processed_data/val.json
-val_image_root: ./datasets/CUHK-PEDES/CUHK-PEDESeid/imgs
+test_file: /home/datasets/CUHK-PEDES/CUHK-PEDES/processed_data/test.json
+test_image_root: /home/datasets/CUHK-PEDES/CUHK-PEDES/imgs
+train_file: [/home/datasets/CUHK-PEDES/CUHK-PEDES/processed_data/train.json]
+train_image_root: /home/datasets/CUHK-PEDES/CUHK-PEDES/imgs
+val_file: /home/datasets/CUHK-PEDES/CUHK-PEDES/processed_data/val.json
+val_image_root: /home/datasets/CUHK-PEDES/CUHK-PEDES/imgs
 
 vision_width: 768
 warm_up: true
