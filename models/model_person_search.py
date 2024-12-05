@@ -8,6 +8,8 @@ from models.cross_transformer import CrossTransformer
 from models.vmamba import vmamba_small_s2l15
 import einops
 
+from models.mamba_text_encoder import MambaForCausalLM
+
 class ALBEF(nn.Module):
     def __init__(self,
                  text_encoder=None,
@@ -24,7 +26,7 @@ class ALBEF(nn.Module):
         #     mlp_ratio=4, qkv_bias=True, norm_layer=partial(nn.LayerNorm, eps=1e-6), )        
         self.visual_encoder = vmamba_small_s2l15(channel_first=True)
         
-        bert_config = BertConfig.from_json_file(config['bert_config'])
+        #bert_config = BertConfig.from_json_file(config['bert_config'])
 
         # self.visual_decoder = CrossTransformer(768, 8, 96, 
         #                         depth = 4, context_dim=768)
@@ -34,7 +36,10 @@ class ALBEF(nn.Module):
         
         # self.mask_token = nn.Parameter(torch.randn(1, 1, 768))
         
-        self.text_encoder = BertForMaskedLM.from_pretrained(text_encoder, config=bert_config)
+        #self.text_encoder = BertForMaskedLM.from_pretrained(text_encoder, config=bert_config)
+        self.text_encoder = MambaForCausalLM.from_pretrained("state-spaces/mamba-130m-hf")
+        self.text_encoder.backbone.resize_token_embeddings(len(tokenizer))
+
         self.text_width = self.text_encoder.config.hidden_size
         self.vision_proj = nn.Linear(vision_width, embed_dim)
         self.text_proj = nn.Linear(self.text_width, embed_dim)
@@ -53,7 +58,10 @@ class ALBEF(nn.Module):
         #     mlp_ratio=4, qkv_bias=True, norm_layer=partial(nn.LayerNorm, eps=1e-6), )        
         self.visual_encoder_m = vmamba_small_s2l15(channel_first=True)
         self.vision_proj_m = nn.Linear(vision_width, embed_dim)
-        self.text_encoder_m = BertForMaskedLM.from_pretrained(text_encoder, config=bert_config)
+        #self.text_encoder_m = BertForMaskedLM.from_pretrained(text_encoder, config=bert_config)
+        self.text_encoder_m = MambaForCausalLM.from_pretrained("state-spaces/mamba-130m-hf")
+        self.text_encoder_m.backbone.resize_token_embeddings(len(tokenizer))
+
         self.text_proj_m = nn.Linear(self.text_width, embed_dim)
         self.model_pairs = [[self.visual_encoder, self.visual_encoder_m],
                             [self.vision_proj, self.vision_proj_m],
@@ -83,10 +91,10 @@ class ALBEF(nn.Module):
         image_feat = F.normalize(self.vision_proj(image_embeds.mean(dim = 1)), dim=-1)
 
         # extract text features
-        text_output = self.text_encoder.bert(text2.input_ids, attention_mask=text2.attention_mask,
-                                             return_dict=True, mode='text')
+        text_output = self.text_encoder.backbone(text2.input_ids, attention_mask=text2.attention_mask,
+                                             return_dict=True)
         
-        text_feat = F.normalize(self.text_proj(text_output.last_hidden_state[:, 0, :]), dim=-1)
+        text_feat = F.normalize(self.text_proj(text_output.last_hidden_state.mean(dim=1)), dim=-1)
 
         # Contrastive loss
         idx = idx.view(-1, 1)
@@ -102,9 +110,9 @@ class ALBEF(nn.Module):
             image_feat_m = F.normalize(self.vision_proj_m(image_embeds.mean(dim = 1)), dim=-1)
             image_feat_all = torch.cat([image_feat_m.t(), self.image_queue.clone().detach()], dim=1)
 
-            text_output_m = self.text_encoder_m.bert(text2.input_ids, attention_mask=text2.attention_mask,
-                                                     return_dict=True, mode='text')
-            text_feat_m = F.normalize(self.text_proj_m(text_output_m.last_hidden_state[:, 0, :]), dim=-1)
+            text_output_m = self.text_encoder_m.backbone(text2.input_ids, attention_mask=text2.attention_mask,
+                                                     return_dict=True)
+            text_feat_m = F.normalize(self.text_proj_m(text_output_m.last_hidden_state.mean(dim = 1)), dim=-1)
             text_feat_all = torch.cat([text_feat_m.t(), self.text_queue.clone().detach()], dim=1)
 
             sim_i2t_m = image_feat_m @ text_feat_all / self.temp
@@ -134,12 +142,10 @@ class ALBEF(nn.Module):
         # Probabilistic Image-Text Matching
         # forward the positve image-text pairs
 
-        output_pos = self.text_encoder.bert(text2.input_ids,
+        output_pos = self.text_encoder.backbone(text2.input_ids,
                                             attention_mask=text2.attention_mask,
-                                            encoder_hidden_states=image_embeds,
-                                            encoder_attention_mask=image_atts,
-                                            return_dict=True, 
-                                            mode='multi_modal')
+                                            context=image_embeds,
+                                            return_dict=True)
         with torch.no_grad():
             bs = image1.size(0)
             weights_i2t = F.softmax(sim_i2t[:, :bs], dim=1)
@@ -167,15 +173,13 @@ class ALBEF(nn.Module):
         image_embeds_all = torch.cat([image_embeds_neg, image_embeds], dim=0)
         image_atts_all = torch.cat([image_atts, image_atts], dim=0)
         
-        output_neg_cross = self.text_encoder.bert(text_inputs_ids_all,
+        output_neg_cross = self.text_encoder.backbone(text_inputs_ids_all,
                                             attention_mask=text_atts_all,
-                                            encoder_hidden_states=image_embeds_all,
-                                            encoder_attention_mask=image_atts_all,
-                                            return_dict=True,
-                                            mode='multi_modal'
+                                            context=image_embeds_all,
+                                            return_dict=True
                                             )
 
-        vl_embeddings = torch.cat([output_pos.last_hidden_state[:, 0, :], output_neg_cross.last_hidden_state[:, 0, :]],
+        vl_embeddings = torch.cat([output_pos.last_hidden_state.mean(dim=1), output_neg_cross.last_hidden_state.mean(dim=1)],
                                   dim=0)
         vl_output = self.itm_head(vl_embeddings)
         itm_labels = torch.cat([torch.ones(bs, dtype=torch.long), torch.zeros(2 * bs, dtype=torch.long)],
@@ -224,7 +228,7 @@ class ALBEF(nn.Module):
         loss_pitm=loss_pitm
 
         # Positive Relation Detection
-        prd_output = self.prd_head(output_pos.last_hidden_state[:, 0, :])
+        prd_output = self.prd_head(output_pos.last_hidden_state.mean(dim=1))
         loss_prd = F.cross_entropy(prd_output, replace)
 
         # Sensitivity-aware Learning: Masked Language Modeling + Momentum-based Replaced Token Detection
@@ -237,16 +241,13 @@ class ALBEF(nn.Module):
         with torch.no_grad():
             logits_m = self.text_encoder_m(input_ids,
                                            attention_mask=text1.attention_mask,
-                                           encoder_hidden_states=image_embeds_m,
-                                           encoder_attention_mask=image_atts,
-                                           return_dict=True,
-                                           return_logits=True,
+                                           context=image_embeds_m
                                            )
-            prediction = F.softmax(logits_m, dim=-1)
+            prediction = F.softmax(logits_m.logits, dim=-1)
         mlm_output = self.text_encoder(input_ids,
                                        attention_mask=text1.attention_mask,
-                                       encoder_hidden_states=image_embeds,
-                                       encoder_attention_mask=image_atts,
+                                       context=image_embeds,
+                                    #    encoder_attention_mask=image_atts,
                                        return_dict=True,
                                        labels=labels,
                                        soft_labels=prediction,
@@ -260,17 +261,13 @@ class ALBEF(nn.Module):
             # momentum module is used as generator
             mrtd_logits_m = self.text_encoder_m(mrtd_input_ids,
                                                attention_mask=text1.attention_mask,
-                                               encoder_hidden_states=image_embeds_m,
-                                               encoder_attention_mask=image_atts,
-                                               return_dict=True,
-                                               return_logits=True,
+                                               context=image_embeds_m
                                                )
-            weights = F.softmax(mrtd_logits_m, dim=-1)
+            weights = F.softmax(mrtd_logits_m.logits, dim=-1)
             mrtd_input_ids, mrtd_labels = self.mrtd_mask_modeling(mrtd_input_ids, text1.input_ids, text1.attention_mask, weights)
-        output_mrtd = self.text_encoder.bert(mrtd_input_ids,
+        output_mrtd = self.text_encoder.backbone(mrtd_input_ids,
                                             attention_mask=text1.attention_mask,
-                                            encoder_hidden_states=image_embeds,
-                                            encoder_attention_mask=image_atts,
+                                            context=image_embeds,
                                             return_dict=True,
                                             )
         mrtd_output = self.mrtd_head(output_mrtd.last_hidden_state.view(-1, self.text_width))
@@ -383,7 +380,7 @@ class ALBEF(nn.Module):
         bs = mrtd_input_ids.size(0)
         weights = weights.view(-1, weights.size(-1))
         pred = torch.multinomial(weights, 1).view(bs, -1)
-        pred[:, 0] = self.tokenizer.cls_token_id
+        # pred[:, 0] = self.tokenizer.cls_token_id
         # pad_token_id is 0
         mrtd_input_ids = pred * attention_mask
         mrtd_labels = (pred != ori_input_ids) * attention_mask

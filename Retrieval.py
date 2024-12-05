@@ -24,6 +24,8 @@ from models.vit import interpolate_pos_embed
 from optim import create_optimizer
 from scheduler import create_scheduler
 
+from transformers import AutoTokenizer
+
 
 def train(model, data_loader, optimizer, tokenizer, epoch, warmup_steps, device, scheduler, config):
     # train
@@ -92,8 +94,7 @@ nlp = spacy.load('en_core_web_sm')
 
 def get_attribute_mask(text_ids, tokenizer):
     size = text_ids.size(0)
-    text = " ".join([tokenizer.decode([token_id]) for token_id in text_ids[1:]])
-
+    text = "".join([tokenizer.decode([token_id]) for token_id in text_ids])
     doc = nlp(text)
     attribute_mask = torch.zeros(size)
     text_words=text.split()
@@ -105,20 +106,20 @@ def get_attribute_mask(text_ids, tokenizer):
     for chunk in doc.noun_chunks:
         pos=[]
         adj_founded=False # just to be sure
-        for tok in chunk:
+        for tok in chunk:            
             if tok.pos_ == "NOUN":
                 # noun = tok.text
-                #manage she's to be split in she is
+                #manage she's to be split in she is                
                 while (char_count<=tok.idx and tok.idx<=char_count+len(text_words[idx_words]))==False:
                     char_count+=len(text_words[idx_words])+1
                     idx_words+=1
-                pos.append(idx_words+1) # +1 to account for [CLS]
+                pos.append(idx_words) # +1 to account for [CLS]
             if tok.pos_ == "ADJ":
                 adj_founded=True
                 while (char_count<=tok.idx and tok.idx<=char_count+len(text_words[idx_words]))==False:
                     char_count+=len(text_words[idx_words])+1
                     idx_words+=1
-                pos.append(idx_words+1) # +1 to account for [CLS]
+                pos.append(idx_words) # +1 to account for [CLS]
                 
         if len(pos)>1 and adj_founded:
             attribute_mask[pos]=count
@@ -283,8 +284,9 @@ def main(args, config):
                                                           is_trains=[True, False, False],
                                                           collate_fns=[None, None, None])
     print(args.text_encoder)
-    tokenizer = BertTokenizer.from_pretrained(args.text_encoder)
-
+    #tokenizer = BertTokenizer.from_pretrained(args.text_encoder)
+    tokenizer = AutoTokenizer.from_pretrained("state-spaces/mamba-130m-hf")
+    tokenizer.add_special_tokens({"mask_token": "[mask]"})
 
     start_epoch = 0
     max_epoch = config['schedular']['epochs']
